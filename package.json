@@ -1,0 +1,22 @@
+{
+  "name": "aws-serverless-lambda-app",
+  "version": "1.0.0",
+  "description": "Lambda function that makes API call and writes to S3",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "lambda",
+    "aws",
+    "serverless"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.450.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
