@@ -39,6 +39,12 @@ pipeline {
         INFRA_REPO_DIR = 'infra-repo'
     }
     
+    // Tools available in the pipeline
+    // IMPORTANT: The name 'NodeJS-22' must match the Node.js tool name you configured in Jenkins (Step 3)
+    tools {
+        nodejs 'NodeJS-22'
+    }
+    
     stages {
         /**
          * ====================================================================
@@ -60,7 +66,28 @@ pipeline {
         
         /**
          * ====================================================================
-         * STAGE 2: INSTALL DEPENDENCIES
+         * STAGE 2: SETUP NODE.JS
+         * ====================================================================
+         * Verify Node.js is available
+         */
+        stage('Setup Node.js') {
+            steps {
+                script {
+                    echo "============================================"
+                    echo "Setting up Node.js"
+                    echo "============================================"
+                }
+                sh '''
+                    node --version
+                    npm --version
+                    echo "Node.js and npm are available"
+                '''
+            }
+        }
+        
+        /**
+         * ====================================================================
+         * STAGE 3: INSTALL DEPENDENCIES
          * ====================================================================
          * Install Node.js dependencies for Lambda function
          */
@@ -80,7 +107,7 @@ pipeline {
         
         /**
          * ====================================================================
-         * STAGE 3: RUN TESTS
+         * STAGE 4: RUN TESTS
          * ====================================================================
          * Test Lambda function locally (optional - add tests here)
          */
@@ -104,7 +131,7 @@ pipeline {
         
         /**
          * ====================================================================
-         * STAGE 4: PACKAGE LAMBDA CODE
+         * STAGE 5: PACKAGE LAMBDA CODE
          * ====================================================================
          * Create ZIP file with Lambda code for deployment
          */
@@ -132,7 +159,7 @@ pipeline {
         
         /**
          * ====================================================================
-         * STAGE 5: CREATE PR CONFIG IN INFRA REPO
+         * STAGE 6: CREATE PR CONFIG IN INFRA REPO
          * ====================================================================
          * Create PR-specific configuration folder in infrastructure repo
          */
@@ -179,7 +206,7 @@ EOF
         
         /**
          * ====================================================================
-         * STAGE 6: DEPLOY INFRASTRUCTURE (via webhook or direct call)
+         * STAGE 7: DEPLOY INFRASTRUCTURE (via webhook or direct call)
          * ====================================================================
          * Trigger infrastructure deployment for this PR
          * Note: This can be done via webhook to infra repo or direct API call
@@ -204,7 +231,7 @@ EOF
         
         /**
          * ====================================================================
-         * STAGE 7: WAIT FOR INFRASTRUCTURE DEPLOYMENT
+         * STAGE 8: WAIT FOR INFRASTRUCTURE DEPLOYMENT
          * ====================================================================
          * Wait for infrastructure to be ready before deploying Lambda
          */
@@ -227,7 +254,7 @@ EOF
         
         /**
          * ====================================================================
-         * STAGE 8: DEPLOY LAMBDA FUNCTION
+         * STAGE 9: DEPLOY LAMBDA FUNCTION
          * ====================================================================
          * Update Lambda function code with packaged ZIP file
          */
@@ -270,7 +297,7 @@ EOF
         
         /**
          * ====================================================================
-         * STAGE 9: VERIFY DEPLOYMENT
+         * STAGE 10: VERIFY DEPLOYMENT
          * ====================================================================
          * Test the deployed Lambda function
          */
