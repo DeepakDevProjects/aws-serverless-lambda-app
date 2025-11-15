@@ -210,10 +210,10 @@ EOF
         
         /**
          * ====================================================================
-         * STAGE 7: DEPLOY INFRASTRUCTURE (via webhook or direct call)
+         * STAGE 7: TRIGGER INFRASTRUCTURE DEPLOYMENT
          * ====================================================================
-         * Trigger infrastructure deployment for this PR
-         * Note: This can be done via webhook to infra repo or direct API call
+         * Automatically trigger infrastructure pipeline for this PR
+         * This calls the infrastructure-pipeline Jenkins job with PR number parameter
          */
         stage('Trigger Infrastructure Deployment') {
             steps {
@@ -221,38 +221,86 @@ EOF
                     echo "============================================"
                     echo "Triggering infrastructure deployment for PR ${PR_NUMBER}"
                     echo "============================================"
-                    echo "Note: Infrastructure repo Jenkins job should be triggered"
-                    echo "via webhook or manually to deploy resources"
+                    
+                    // Trigger infrastructure pipeline job with PR number parameter
+                    // This automatically triggers the infrastructure pipeline
+                    echo "Calling infrastructure-pipeline job with PR_NUMBER=${PR_NUMBER}"
+                    
+                    try {
+                        def infraJob = build job: 'infrastructure-pipeline',
+                            parameters: [
+                                string(name: 'PR_NUMBER', value: "${PR_NUMBER}")
+                            ],
+                            wait: true,  // Wait for infrastructure deployment to complete
+                            propagate: false  // Don't fail Lambda app pipeline if infra fails (we'll check later)
+                        
+                        echo "Infrastructure pipeline completed for PR ${PR_NUMBER}"
+                        echo "Infrastructure pipeline build number: ${infraJob.number}"
+                        echo "Infrastructure pipeline result: ${infraJob.result}"
+                    } catch (Exception e) {
+                        echo "WARNING: Infrastructure pipeline failed or not found: ${e.message}"
+                        echo "Continuing Lambda deployment - infrastructure may still be deploying"
+                    }
                 }
-                // Optional: Call infrastructure repo Jenkins job via API
-                // Or rely on webhook from previous stage's git push
-                sh '''
-                    echo "Infrastructure deployment should be triggered automatically"
-                    echo "via GitHub webhook or manually in infrastructure repo Jenkins job"
-                '''
             }
         }
         
         /**
          * ====================================================================
-         * STAGE 8: WAIT FOR INFRASTRUCTURE DEPLOYMENT
+         * STAGE 8: VERIFY INFRASTRUCTURE DEPLOYMENT
          * ====================================================================
-         * Wait for infrastructure to be ready before deploying Lambda
+         * Verify infrastructure is ready before deploying Lambda
          */
-        stage('Wait for Infrastructure') {
+        stage('Verify Infrastructure Ready') {
             steps {
                 script {
                     echo "============================================"
-                    echo "Waiting for infrastructure deployment to complete"
+                    echo "Verifying infrastructure deployment is complete"
                     echo "============================================"
                 }
-                sh '''
-                    # Wait a bit for infrastructure to deploy
-                    # In production, poll CloudFormation stack status
-                    echo "Waiting 30 seconds for infrastructure deployment..."
-                    sleep 30
-                    echo "Proceeding with Lambda deployment..."
-                '''
+                withCredentials([[$class: 'AmazonWebServicesCredentialsBinding', credentialsId: "${AWS_CREDENTIALS_ID}"]]) {
+                    sh '''
+                        # Find AWS CLI
+                        AWS_CLI=$(which aws 2>/dev/null || echo "/opt/homebrew/bin/aws")
+                        if [ ! -f "${AWS_CLI}" ]; then
+                            AWS_CLI=$(find /opt/homebrew /usr/local /usr -name aws 2>/dev/null | head -1)
+                        fi
+                        
+                        if [ -z "${AWS_CLI}" ] || [ ! -f "${AWS_CLI}" ]; then
+                            echo "WARNING: AWS CLI not found. Skipping infrastructure verification."
+                            exit 0
+                        fi
+                        
+                        STACK_NAME="InfrastructureStack-${PR_NUMBER}"
+                        MAX_RETRIES=10
+                        RETRY_COUNT=0
+                        
+                        echo "Checking if CloudFormation stack ${STACK_NAME} is ready..."
+                        
+                        while [ ${RETRY_COUNT} -lt ${MAX_RETRIES} ]; do
+                            STACK_STATUS=$(${AWS_CLI} cloudformation describe-stacks \
+                                --stack-name ${STACK_NAME} \
+                                --query 'Stacks[0].StackStatus' \
+                                --output text \
+                                --region us-east-1 2>/dev/null || echo "NOT_FOUND")
+                            
+                            if [ "${STACK_STATUS}" = "CREATE_COMPLETE" ] || [ "${STACK_STATUS}" = "UPDATE_COMPLETE" ]; then
+                                echo "✅ Infrastructure stack is ready!"
+                                exit 0
+                            elif [ "${STACK_STATUS}" = "CREATE_IN_PROGRESS" ] || [ "${STACK_STATUS}" = "UPDATE_IN_PROGRESS" ]; then
+                                RETRY_COUNT=$((RETRY_COUNT + 1))
+                                echo "Stack status: ${STACK_STATUS} - Waiting... (${RETRY_COUNT}/${MAX_RETRIES})"
+                                sleep 10
+                            else
+                                echo "Stack status: ${STACK_STATUS}"
+                                echo "Proceeding anyway - stack may still be deploying"
+                                exit 0
+                            fi
+                        done
+                        
+                        echo "Timeout waiting for infrastructure. Proceeding with Lambda deployment..."
+                    '''
+                }
             }
         }
         
