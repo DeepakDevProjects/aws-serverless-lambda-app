@@ -40,3 +40,6 @@ npm install
 
 Deployment will be handled via Jenkins pipeline (coming soon).
 
+Thank you
+This line is added to test automatic Jenkins trigger for PR branch `feature/test-pr-123`.
+
