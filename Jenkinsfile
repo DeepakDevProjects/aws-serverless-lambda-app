@@ -25,8 +25,8 @@ pipeline {
     
     // Environment variables available throughout the pipeline
     environment {
-        // Get PR number from GitHub webhook or manually set
-        PR_NUMBER = "${env.CHANGE_ID ?: params.PR_NUMBER ?: 'default'}"
+        // PR_NUMBER will be set in the first stage from branch name or CHANGE_ID
+        PR_NUMBER = 'default'
         
         // AWS credentials (set in Jenkins Credentials Store)
         AWS_CREDENTIALS_ID = 'aws-credentials'
@@ -52,16 +52,42 @@ pipeline {
     stages {
         /**
          * ====================================================================
-         * STAGE 1: CHECKOUT CODE
+         * STAGE 1: CHECKOUT CODE & DETECT PR NUMBER
          * ====================================================================
-         * Check out the Lambda app repository code
+         * Check out the Lambda app repository code and extract PR number
          */
         stage('Checkout Lambda App Code') {
             steps {
                 script {
                     echo "============================================"
                     echo "Checking out Lambda App repository"
-                    echo "PR Number: ${PR_NUMBER}"
+                    echo "Branch: ${env.BRANCH_NAME ?: 'unknown'}"
+                    echo "Change ID (PR): ${env.CHANGE_ID ?: 'not a PR'}"
+                    echo "============================================"
+                    
+                    // Extract PR number from branch name or use CHANGE_ID
+                    def branchName = env.BRANCH_NAME ?: 'default'
+                    def changeId = env.CHANGE_ID
+                    
+                    if (changeId) {
+                        // This is a PR - use CHANGE_ID
+                        env.PR_NUMBER = changeId
+                        echo "Detected PR number from CHANGE_ID: ${env.PR_NUMBER}"
+                    } else {
+                        // Extract PR number from branch name
+                        // Patterns: "feature/pr-222", "PR-123", "feature/test-pr-121"
+                        def prMatch = branchName =~ /(?:pr|PR)[-_]?(\d+)/
+                        if (prMatch) {
+                            env.PR_NUMBER = prMatch[0][1]
+                            echo "Extracted PR number from branch name: ${env.PR_NUMBER}"
+                        } else {
+                            // Use sanitized branch name as identifier
+                            env.PR_NUMBER = branchName.replaceAll(/[^a-zA-Z0-9]/, '-')
+                            echo "Using branch name as identifier: ${env.PR_NUMBER}"
+                        }
+                    }
+                    
+                    echo "Final PR Number: ${env.PR_NUMBER}"
                     echo "============================================"
                 }
                 checkout scm
