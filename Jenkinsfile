@@ -44,8 +44,8 @@ pipeline {
         // AWS credentials (set in Jenkins Credentials Store)
         AWS_CREDENTIALS_ID = 'aws-credentials'
         
-        // GitHub token for accessing infrastructure repo
-        GITHUB_TOKEN_CREDENTIALS_ID = 'github-token'
+        // GitHub token for PR detection via API
+        GITHUB_TOKEN_CREDENTIALS_ID = 'github-token-pr-detection'
         
         // Repository paths
         INFRA_REPO_URL = 'https://github.com/DeepakDevProjects/aws-infrastructure-as-code.git'
