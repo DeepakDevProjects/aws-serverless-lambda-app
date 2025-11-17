@@ -599,9 +599,19 @@ EOF
                         # Check if Lambda function exists
                         if ${AWS_CLI} lambda get-function --function-name ${LAMBDA_FUNCTION_NAME} 2>/dev/null; then
                             echo "Updating existing Lambda function..."
+                            
+                            # Update function code
                             ${AWS_CLI} lambda update-function-code \
                                 --function-name ${LAMBDA_FUNCTION_NAME} \
                                 --zip-file fileb://lambda-function-pr-${PR_NUMBER}.zip
+                            
+                            # Update handler to match the code structure (src/index.js -> src/index.handler)
+                            echo "Updating Lambda handler to src/index.handler..."
+                            ${AWS_CLI} lambda update-function-configuration \
+                                --function-name ${LAMBDA_FUNCTION_NAME} \
+                                --handler "src/index.handler" || {
+                                    echo "Warning: Failed to update handler, continuing..."
+                                }
                         else
                             echo "Lambda function does not exist yet."
                             echo "It should be created by infrastructure repo deployment."
