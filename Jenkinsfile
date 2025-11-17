@@ -153,13 +153,14 @@ pipeline {
                             def owner = null
                             def repo = null
                             
-                            // Try https:// format first
-                            def httpsMatch = repoUrl =~ /github\.com[:/]([^\/]+)\/([^\/]+?)(?:\.git)?$/
+                            // Try https:// format first (matches github.com/owner/repo or github.com:owner/repo)
+                            // Use string pattern to avoid character class parsing issues in slashy strings
+                            def httpsMatch = repoUrl =~ "github\\.com(?:[:]|/)([^/]+)/([^/]+?)(?:\\.git)?\\\$"
                             if (httpsMatch.find()) {
                                 owner = httpsMatch.group(1)
                                 repo = httpsMatch.group(2)
                             } else {
-                                // Try git@ format
+                                // Try git@ format (matches git@github.com:owner/repo)
                                 def sshMatch = repoUrl =~ /git@github\.com[:]([^\/]+)\/([^\/]+?)(?:\.git)?$/
                                 if (sshMatch.find()) {
                                     owner = sshMatch.group(1)
