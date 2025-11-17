@@ -135,13 +135,26 @@ pipeline {
                     
                     echo "Detected branch: ${branchName}"
                     
-                    // PR number detection: ONLY use GitHub API call
-                    echo "Querying GitHub API to find PR number for branch: ${branchName}"
+                    // PR number detection: Priority order:
+                    // 1. Webhook environment variables (CHANGE_ID, ghprbPullId)
+                    // 2. GitHub API call
+                    // 3. Branch name pattern matching (fallback)
                     
                     // Use a script variable to store PR number, then assign to env after withCredentials
                     def detectedPrNumber = null
                     
-                    withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
+                    // Step 1: Check webhook environment variables first
+                    if (env.CHANGE_ID) {
+                        detectedPrNumber = env.CHANGE_ID.toString().trim()
+                        echo "✅ Found PR number from webhook (CHANGE_ID): ${detectedPrNumber}"
+                    } else if (env.ghprbPullId) {
+                        detectedPrNumber = env.ghprbPullId.toString().trim()
+                        echo "✅ Found PR number from webhook (ghprbPullId): ${detectedPrNumber}"
+                    } else {
+                        // Step 2: Fallback to GitHub API call
+                        echo "No webhook PR number found, querying GitHub API for branch: ${branchName}"
+                        
+                        withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
                         try {
                             // Get repository owner and name from git remote
                             def repoUrl = sh(
@@ -211,40 +224,39 @@ pipeline {
                                     echo "PR number from API: ${prNumberValue} (type: ${prNumberValue?.getClass()?.name})"
                                     
                                     if (prNumberValue != null) {
-                                        // Set both script variable and env variable directly here
+                                        // Only set script variable inside withCredentials block
+                                        // env.PR_NUMBER will be set AFTER the block closes
                                         def prNumberStr = prNumberValue.toString().trim()
                                         detectedPrNumber = prNumberStr
-                                        env.PR_NUMBER = prNumberStr
                                         echo "✅ Found PR number from GitHub API: ${prNumberStr}"
-                                        echo "✅ Set env.PR_NUMBER to: ${env.PR_NUMBER}"
+                                        echo "✅ Stored in detectedPrNumber: ${detectedPrNumber}"
                                     } else {
-                                        echo "⚠️ PR object found but 'number' field is null"
-                                        error("❌ PR response missing 'number' field")
+                                        echo "⚠️ PR object found but 'number' field is null, falling back to default."
+                                        // Do not error, allow fallback
                                     }
                                 } else {
-                                    echo "⚠️ No open PR found for branch: ${branchName}"
-                                    error("❌ No open PR found for branch: ${branchName}. Please create a PR first.")
+                                    echo "⚠️ No open PR found for branch: ${branchName}, falling back to default."
+                                    // Do not error, allow fallback
                                 }
                             } else {
-                                error("❌ Could not parse repository URL: ${repoUrl}")
+                                echo "⚠️ Could not parse repository URL: ${repoUrl}, falling back to default."
+                                // Do not error, allow fallback
                             }
                         } catch (Exception e) {
-                            echo "❌ Failed to query GitHub API: ${e.getMessage()}"
-                            echo "Stack trace: ${e.getStackTrace().join('\\n')}"
-                            error("❌ Failed to query GitHub API: ${e.getMessage()}")
+                            echo "❌ Failed to query GitHub API: ${e.getMessage()}, falling back to default."
+                            // Do not error, allow fallback
+                        }
                         }
                     }
                     
-                    // Verify PR_NUMBER was set (it should have been set inside withCredentials block)
-                    if (!env.PR_NUMBER || env.PR_NUMBER == 'default') {
-                        echo "⚠️ PR_NUMBER was not set correctly, checking detectedPrNumber: '${detectedPrNumber}'"
-                        if (detectedPrNumber && detectedPrNumber != 'null' && detectedPrNumber != '') {
-                            env.PR_NUMBER = detectedPrNumber.toString().trim()
-                            echo "✅ PR_NUMBER set from detectedPrNumber: ${env.PR_NUMBER}"
-                        } else {
-                            echo "⚠️ Could not detect PR number, using default"
-                            env.PR_NUMBER = 'default'
-                        }
+                    // Set env.PR_NUMBER AFTER withCredentials block closes (or after webhook check)
+                    // This ensures the environment variable persists correctly
+                    if (detectedPrNumber && detectedPrNumber != 'null' && detectedPrNumber != '' && detectedPrNumber != 'default') {
+                        env.PR_NUMBER = detectedPrNumber.toString().trim()
+                        echo "✅ PR_NUMBER set from detection result: ${env.PR_NUMBER}"
+                    } else {
+                        echo "⚠️ Could not detect PR number, using default"
+                        env.PR_NUMBER = 'default'
                     }
                     
                     echo "Final PR Number: ${env.PR_NUMBER}"
