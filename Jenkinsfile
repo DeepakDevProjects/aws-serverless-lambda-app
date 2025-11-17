@@ -58,35 +58,65 @@ pipeline {
          */
         stage('Checkout Lambda App Code') {
             steps {
-                // Checkout the branch that triggered the webhook
-                checkout scm
-                
                 script {
                     echo "============================================"
                     echo "Checking out Lambda App repository"
                     echo "============================================"
                     
-                    // Try multiple sources to reliably determine the branch name
-                    def branchName = env.BRANCH_NAME ?: env.GIT_BRANCH
+                    // First, try to get branch from webhook payload or environment variables
+                    // GitHub webhook sets GIT_BRANCH in format: origin/feature/pr-123
+                    def branchName = env.GIT_BRANCH ?: env.BRANCH_NAME
                     
-                    if (!branchName || branchName.trim() == '' || branchName == 'detached') {
-                        // Fallback to git show-current (works if not in detached HEAD)
+                    // Normalize branch name (remove origin/ prefix if present)
+                    if (branchName) {
+                        branchName = branchName.replaceFirst(/^origin\\//, '')
+                        echo "Branch from environment: ${branchName}"
+                    }
+                    
+                    // If no branch detected, we'll checkout and detect from git
+                    if (!branchName || branchName.trim() == '' || branchName == 'detached' || branchName == 'HEAD') {
+                        echo "No branch detected from environment, checking out default and detecting..."
+                        // Checkout using SCM configuration (will use branch specifier)
+                        checkout scm
+                        
+                        // Now detect the actual branch that was checked out
                         branchName = sh(
-                            script: 'git branch --show-current 2>/dev/null || true',
+                            script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true',
+                            returnStdout: true
+                        ).trim()
+                        
+                        // If still HEAD, try to get from remote tracking branch
+                        if (branchName == 'HEAD' || !branchName) {
+                            branchName = sh(
+                                script: 'git branch -r --contains HEAD 2>/dev/null | head -1 | sed "s|origin/||" | xargs || true',
+                                returnStdout: true
+                            ).trim()
+                        }
+                    } else {
+                        // We have a branch name from webhook, explicitly checkout that branch
+                        echo "Explicitly checking out branch: ${branchName}"
+                        checkout([
+                            $class: 'GitSCM',
+                            branches: [[name: "*/${branchName}"]],
+                            userRemoteConfigs: scm.userRemoteConfigs,
+                            extensions: scm.extensions
+                        ])
+                    }
+                    
+                    // Final normalization
+                    branchName = branchName?.replaceFirst(/^origin\\//, '')?.trim()
+                    
+                    if (!branchName || branchName == 'HEAD') {
+                        // Last resort: use git to find the branch
+                        branchName = sh(
+                            script: '''
+                                git branch -a | grep -E 'feature/pr-[0-9]+' | head -1 | sed 's|remotes/origin/||' | sed 's|^[* ] ||' | xargs || \
+                                git log --oneline -1 --format="%D" | grep -oE 'feature/pr-[0-9]+' | head -1 || \
+                                echo "unknown"
+                            ''',
                             returnStdout: true
                         ).trim()
                     }
-                    
-                    if (!branchName || branchName.trim() == '' || branchName == 'HEAD') {
-                        // Final fallback: rev-parse (may return HEAD) or commit SHA
-                        branchName = sh(
-                            script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || git rev-parse --short HEAD',
-                            returnStdout: true
-                        ).trim()
-                    }
-                    
-                    // Normalize origin/ prefixes
-                    branchName = branchName?.replaceFirst(/^origin\\//, '')
                     
                     echo "Detected branch: ${branchName}"
                     
