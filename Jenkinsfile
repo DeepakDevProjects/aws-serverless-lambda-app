@@ -211,9 +211,12 @@ pipeline {
                                     echo "PR number from API: ${prNumberValue} (type: ${prNumberValue?.getClass()?.name})"
                                     
                                     if (prNumberValue != null) {
-                                        // Store in script variable (will assign to env after this block)
-                                        detectedPrNumber = prNumberValue.toString()
-                                        echo "✅ Found PR number from GitHub API: ${detectedPrNumber}"
+                                        // Set both script variable and env variable directly here
+                                        def prNumberStr = prNumberValue.toString().trim()
+                                        detectedPrNumber = prNumberStr
+                                        env.PR_NUMBER = prNumberStr
+                                        echo "✅ Found PR number from GitHub API: ${prNumberStr}"
+                                        echo "✅ Set env.PR_NUMBER to: ${env.PR_NUMBER}"
                                     } else {
                                         echo "⚠️ PR object found but 'number' field is null"
                                         error("❌ PR response missing 'number' field")
@@ -232,13 +235,16 @@ pipeline {
                         }
                     }
                     
-                    // Assign to environment variable after withCredentials block
-                    if (detectedPrNumber) {
-                        env.PR_NUMBER = detectedPrNumber
-                        echo "✅ PR_NUMBER set to: ${env.PR_NUMBER}"
-                    } else {
-                        echo "⚠️ Could not detect PR number, using default"
-                        env.PR_NUMBER = 'default'
+                    // Verify PR_NUMBER was set (it should have been set inside withCredentials block)
+                    if (!env.PR_NUMBER || env.PR_NUMBER == 'default') {
+                        echo "⚠️ PR_NUMBER was not set correctly, checking detectedPrNumber: '${detectedPrNumber}'"
+                        if (detectedPrNumber && detectedPrNumber != 'null' && detectedPrNumber != '') {
+                            env.PR_NUMBER = detectedPrNumber.toString().trim()
+                            echo "✅ PR_NUMBER set from detectedPrNumber: ${env.PR_NUMBER}"
+                        } else {
+                            echo "⚠️ Could not detect PR number, using default"
+                            env.PR_NUMBER = 'default'
+                        }
                     }
                     
                     echo "Final PR Number: ${env.PR_NUMBER}"
