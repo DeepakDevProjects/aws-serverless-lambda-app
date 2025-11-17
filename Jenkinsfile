@@ -135,129 +135,68 @@ pipeline {
                     
                     echo "Detected branch: ${branchName}"
                     
-                    // Priority order for PR number detection:
-                    // 1. Webhook environment variables (CHANGE_ID, ghprbPullId) - most reliable
-                    // 2. GitHub API call - finds real PR number for any branch name
-                    // 3. Extract from branch name patterns - fallback if API fails
-                    // 4. Unique identifier - last resort
+                    // PR number detection: ONLY use GitHub API call
+                    echo "Querying GitHub API to find PR number for branch: ${branchName}"
                     
-                    def changeId = env.CHANGE_ID
-                    def ghprbPullId = env.ghprbPullId  // GitHub Pull Request Builder plugin
-                    def found = false
-                    
-                    // Step 1: Check webhook environment variables (highest priority)
-                    if (changeId) {
-                        // PR number from Multibranch Pipeline or webhook
-                        env.PR_NUMBER = changeId
-                        echo "✅ Detected PR number from CHANGE_ID (webhook): ${env.PR_NUMBER}"
-                        found = true
-                    } else if (ghprbPullId) {
-                        // PR number from GitHub Pull Request Builder plugin
-                        env.PR_NUMBER = ghprbPullId
-                        echo "✅ Detected PR number from ghprbPullId (webhook): ${env.PR_NUMBER}"
-                        found = true
-                    }
-                    
-                    // Step 2: If webhook didn't provide PR number, query GitHub API
-                    if (!found) {
-                        echo "Webhook did not provide PR number. Querying GitHub API to find PR for branch: ${branchName}"
-                        
-                        withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
-                            try {
-                                // Get repository owner and name from git remote
-                                def repoUrl = sh(
-                                    script: 'git config --get remote.origin.url',
+                    withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
+                        try {
+                            // Get repository owner and name from git remote
+                            def repoUrl = sh(
+                                script: 'git config --get remote.origin.url',
+                                returnStdout: true
+                            ).trim()
+                            
+                            echo "Repository URL: ${repoUrl}"
+                            
+                            // Extract owner/repo from URL (handles both https:// and git@ formats)
+                            // Pattern matches: github.com:owner/repo or github.com/owner/repo
+                            def owner = null
+                            def repo = null
+                            
+                            // Try https:// format first
+                            def httpsMatch = repoUrl =~ /github\.com[:/]([^\/]+)\/([^\/]+?)(?:\.git)?$/
+                            if (httpsMatch.find()) {
+                                owner = httpsMatch.group(1)
+                                repo = httpsMatch.group(2)
+                            } else {
+                                // Try git@ format
+                                def sshMatch = repoUrl =~ /git@github\.com[:]([^\/]+)\/([^\/]+?)(?:\.git)?$/
+                                if (sshMatch.find()) {
+                                    owner = sshMatch.group(1)
+                                    repo = sshMatch.group(2)
+                                }
+                            }
+                            
+                            if (owner && repo) {
+                                echo "Repository: ${owner}/${repo}"
+                                
+                                // Query GitHub API for open PRs with this branch as head
+                                def apiUrl = "https://api.github.com/repos/${owner}/${repo}/pulls?head=${owner}:${branchName}&state=open"
+                                echo "API URL: ${apiUrl}"
+                                
+                                def response = sh(
+                                    script: """
+                                        curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+                                             -H "Accept: application/vnd.github.v3+json" \
+                                             "${apiUrl}"
+                                    """,
                                     returnStdout: true
                                 ).trim()
                                 
-                                // Extract owner/repo from URL (handles both https and git@ formats)
-                                // Pattern matches: github.com:owner/repo or github.com/owner/repo
-                                // Using string pattern to avoid issues with character class in slashy string
-                                def repoMatch = repoUrl =~ "github\\.com[:/]([^/]+)/([^/]+?)(?:\\.git)?\\\$"
-                                if (repoMatch.find()) {
-                                    def owner = repoMatch.group(1)  // Group 1 is owner
-                                    def repo = repoMatch.group(2)   // Group 2 is repo
-                                    
-                                    echo "Repository: ${owner}/${repo}"
-                                    
-                                    // Query GitHub API for open PRs with this branch as head
-                                    def apiUrl = "https://api.github.com/repos/${owner}/${repo}/pulls?head=${owner}:${branchName}&state=open"
-                                    echo "API URL: ${apiUrl}"
-                                    
-                                    def response = sh(
-                                        script: """
-                                            curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
-                                                 -H "Accept: application/vnd.github.v3+json" \
-                                                 "${apiUrl}"
-                                        """,
-                                        returnStdout: true
-                                    ).trim()
-                                    
-                                    // Parse JSON response to get PR number
-                                    // Use Groovy's JsonSlurper for JSON parsing
-                                    def jsonResponse = new groovy.json.JsonSlurper().parseText(response)
-                                    if (jsonResponse && jsonResponse.size() > 0 && jsonResponse[0].number) {
-                                        env.PR_NUMBER = jsonResponse[0].number.toString()
-                                        echo "✅ Found PR number from GitHub API: ${env.PR_NUMBER}"
-                                        found = true
-                                    } else {
-                                        echo "⚠️ No open PR found for branch: ${branchName}"
-                                    }
+                                // Parse JSON response to get PR number
+                                def jsonResponse = new groovy.json.JsonSlurper().parseText(response)
+                                if (jsonResponse && jsonResponse.size() > 0 && jsonResponse[0].number) {
+                                    env.PR_NUMBER = jsonResponse[0].number.toString()
+                                    echo "✅ Found PR number from GitHub API: ${env.PR_NUMBER}"
                                 } else {
-                                    echo "⚠️ Could not parse repository URL: ${repoUrl}"
+                                    error("❌ No open PR found for branch: ${branchName}. Please create a PR first.")
                                 }
-                            } catch (Exception e) {
-                                echo "⚠️ Failed to query GitHub API: ${e.getMessage()}"
-                                echo "Will try branch name extraction as fallback"
+                            } else {
+                                error("❌ Could not parse repository URL: ${repoUrl}")
                             }
+                        } catch (Exception e) {
+                            error("❌ Failed to query GitHub API: ${e.getMessage()}")
                         }
-                    }
-                    
-                    // Step 3: If API call failed, try extracting from branch name patterns
-                    if (!found) {
-                        echo "Trying to extract PR number from branch name patterns..."
-                        def prMatch = null
-                        
-                        // Pattern 1: pr-123, PR-123, pr_123, PR_123
-                        prMatch = branchName =~ /(?i)pr[-_]?(\d+)/
-                        if (prMatch.find()) {
-                            env.PR_NUMBER = prMatch.group(1)
-                            echo "✅ Extracted PR number from branch name (pattern: pr-XXX): ${env.PR_NUMBER}"
-                            found = true
-                        }
-                        
-                        if (!found) {
-                            // Pattern 2: Any standalone number (e.g., bugfix-123, issue-456)
-                            prMatch = branchName =~ /[-_](\d+)$/
-                            if (prMatch.find()) {
-                                env.PR_NUMBER = prMatch.group(1)
-                                echo "✅ Extracted PR number from branch name (pattern: XXX-123): ${env.PR_NUMBER}"
-                                found = true
-                            }
-                        }
-                        
-                        if (!found) {
-                            // Pattern 3: Any number in the branch name
-                            prMatch = branchName =~ /(\d+)/
-                            if (prMatch.find()) {
-                                env.PR_NUMBER = prMatch.group(1)
-                                echo "✅ Extracted number from branch name: ${env.PR_NUMBER}"
-                                found = true
-                            }
-                        }
-                    }
-                    
-                    // Step 4: Last resort - create unique identifier
-                    if (!found) {
-                        // No PR number found anywhere - create a unique identifier from branch name
-                        // Use first 20 chars of sanitized branch name + short commit hash
-                        def shortHash = sh(
-                            script: 'git rev-parse --short HEAD 2>/dev/null || echo "unknown"',
-                            returnStdout: true
-                        ).trim()
-                        def sanitized = branchName.replaceAll(/[^a-zA-Z0-9]/, '-').take(20)
-                        env.PR_NUMBER = "${sanitized}-${shortHash}"
-                        echo "⚠️ No PR number found. Using unique identifier: ${env.PR_NUMBER}"
                     }
                     
                     echo "Final PR Number: ${env.PR_NUMBER}"
