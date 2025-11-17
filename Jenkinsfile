@@ -4,19 +4,32 @@
  * PURPOSE: Jenkins Pipeline for Lambda App Repository
  * 
  * WHAT THIS PIPELINE DOES:
- * 1. Triggers on Pull Request creation
- * 2. Builds and tests Lambda function code
- * 3. Creates PR-specific configuration in infrastructure repo
- * 4. Packages Lambda code for deployment
- * 5. Deploys Lambda function to AWS
+ * 1. Triggers on push to ANY branch (via GitHub webhook)
+ * 2. Automatically detects branch name and extracts PR number/identifier
+ * 3. Builds and tests Lambda function code
+ * 4. Creates PR-specific configuration in infrastructure repo
+ * 5. Packages Lambda code for deployment
+ * 6. Deploys Lambda function to AWS
+ * 
+ * BRANCH NAMING FLEXIBILITY:
+ * - Supports ANY branch name (e.g., feature/pr-212, bugfix-123, my-branch)
+ * - Extracts PR numbers from multiple patterns:
+ *   * Pattern 1: pr-123, PR-456, pr_789
+ *   * Pattern 2: bugfix-123, issue-456, ticket-789 (trailing numbers)
+ *   * Pattern 3: Any number found in branch name
+ *   * Fallback: Creates unique ID from branch name + commit hash
  * 
  * PR-SPECIFIC RESOURCES:
  * - Lambda function name: api-processor-lambda-pr-{PR_NUMBER}
  * - S3 bucket: Created by infrastructure repo pipeline
  * 
  * TRIGGER:
- * - GitHub webhook on PR creation
+ * - GitHub webhook on push to any branch
  * - Or manual trigger via Jenkins UI
+ * 
+ * JENKINS CONFIGURATION:
+ * - Branch Specifier: ** (matches all branches)
+ * - Lightweight checkout: Disabled (to fetch exact branch from webhook)
  * ============================================================================
  */
 
@@ -107,12 +120,14 @@ pipeline {
                     branchName = branchName?.replaceFirst(/^origin\\//, '')?.trim()
                     
                     if (!branchName || branchName == 'HEAD') {
-                        // Last resort: use git to find the branch
+                        // Last resort: use git to find the current branch
                         branchName = sh(
                             script: '''
-                                git branch -a | grep -E 'feature/pr-[0-9]+' | head -1 | sed 's|remotes/origin/||' | sed 's|^[* ] ||' | xargs || \
-                                git log --oneline -1 --format="%D" | grep -oE 'feature/pr-[0-9]+' | head -1 || \
-                                echo "unknown"
+                                # Try to get branch from git refs
+                                git branch -a --contains HEAD 2>/dev/null | grep -v HEAD | head -1 | sed 's|remotes/origin/||' | sed 's|^[* ] ||' | xargs || \
+                                git log --oneline -1 --format="%D" 2>/dev/null | grep -oE '[^, ]+' | grep -v HEAD | head -1 | sed 's|origin/||' || \
+                                git rev-parse --short HEAD 2>/dev/null || \
+                                echo "unknown-branch"
                             ''',
                             returnStdout: true
                         ).trim()
@@ -133,16 +148,40 @@ pipeline {
                         env.PR_NUMBER = ghprbPullId
                         echo "Detected PR number from ghprbPullId: ${env.PR_NUMBER}"
                     } else {
-                        // Extract PR number from branch name
-                        // Supports: feature/pr-222, PR-123, feature/test-pr-121, release-PR_456, etc.
-                        def prMatch = branchName =~ /(?i)pr[-_]?(\d+)/
+                        // Try multiple patterns to extract PR number from branch name
+                        // Supports: feature/pr-222, PR-123, feature/test-pr-121, release-PR_456, 
+                        //           bugfix-123, hotfix-456, issue-789, ticket-123, etc.
+                        def prMatch = null
+                        
+                        // Pattern 1: pr-123, PR-123, pr_123, PR_123
+                        prMatch = branchName =~ /(?i)pr[-_]?(\d+)/
                         if (prMatch) {
                             env.PR_NUMBER = prMatch[0][1]
-                            echo "Extracted PR number from branch name: ${env.PR_NUMBER}"
+                            echo "Extracted PR number from branch name (pattern: pr-XXX): ${env.PR_NUMBER}"
                         } else {
-                            // Use sanitized branch name as identifier
-                            env.PR_NUMBER = branchName.replaceAll(/[^a-zA-Z0-9]/, '-')
-                            echo "Using branch name as identifier: ${env.PR_NUMBER}"
+                            // Pattern 2: Any standalone number (e.g., bugfix-123, issue-456)
+                            prMatch = branchName =~ /[-_](\d+)$/
+                            if (prMatch) {
+                                env.PR_NUMBER = prMatch[0][1]
+                                echo "Extracted PR number from branch name (pattern: XXX-123): ${env.PR_NUMBER}"
+                            } else {
+                                // Pattern 3: Any number in the branch name
+                                prMatch = branchName =~ /(\d+)/
+                                if (prMatch) {
+                                    env.PR_NUMBER = prMatch[0][1]
+                                    echo "Extracted number from branch name: ${env.PR_NUMBER}"
+                                } else {
+                                    // No number found - create a unique identifier from branch name
+                                    // Use first 20 chars of sanitized branch name + short commit hash
+                                    def shortHash = sh(
+                                        script: 'git rev-parse --short HEAD 2>/dev/null || echo "unknown"',
+                                        returnStdout: true
+                                    ).trim()
+                                    def sanitized = branchName.replaceAll(/[^a-zA-Z0-9]/, '-').take(20)
+                                    env.PR_NUMBER = "${sanitized}-${shortHash}"
+                                    echo "No PR number found in branch name. Using unique identifier: ${env.PR_NUMBER}"
+                                }
+                            }
                         }
                     }
                     
