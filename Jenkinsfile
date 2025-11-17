@@ -138,6 +138,9 @@ pipeline {
                     // PR number detection: ONLY use GitHub API call
                     echo "Querying GitHub API to find PR number for branch: ${branchName}"
                     
+                    // Use a script variable to store PR number, then assign to env after withCredentials
+                    def detectedPrNumber = null
+                    
                     withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
                         try {
                             // Get repository owner and name from git remote
@@ -199,30 +202,43 @@ pipeline {
                                 
                                 // Parse JSON response to get PR number
                                 echo "API Response length: ${response.length()}"
-                                echo "API Response (first 500 chars): ${response.take(500)}"
                                 
                                 def jsonResponse = new groovy.json.JsonSlurper().parseText(response)
                                 echo "Parsed JSON size: ${jsonResponse?.size() ?: 'null or not an array'}"
                                 
                                 if (jsonResponse && jsonResponse.size() > 0) {
-                                    echo "First PR object: ${jsonResponse[0]}"
-                                    if (jsonResponse[0].number) {
-                                        env.PR_NUMBER = jsonResponse[0].number.toString()
-                                        echo "✅ Found PR number from GitHub API: ${env.PR_NUMBER}"
+                                    def prNumberValue = jsonResponse[0].number
+                                    echo "PR number from API: ${prNumberValue} (type: ${prNumberValue?.getClass()?.name})"
+                                    
+                                    if (prNumberValue != null) {
+                                        // Store in script variable (will assign to env after this block)
+                                        detectedPrNumber = prNumberValue.toString()
+                                        echo "✅ Found PR number from GitHub API: ${detectedPrNumber}"
                                     } else {
-                                        echo "⚠️ PR object found but 'number' field is missing: ${jsonResponse[0]}"
+                                        echo "⚠️ PR object found but 'number' field is null"
                                         error("❌ PR response missing 'number' field")
                                     }
                                 } else {
-                                    echo "⚠️ API Response: ${response}"
+                                    echo "⚠️ No open PR found for branch: ${branchName}"
                                     error("❌ No open PR found for branch: ${branchName}. Please create a PR first.")
                                 }
                             } else {
                                 error("❌ Could not parse repository URL: ${repoUrl}")
                             }
                         } catch (Exception e) {
+                            echo "❌ Failed to query GitHub API: ${e.getMessage()}"
+                            echo "Stack trace: ${e.getStackTrace().join('\\n')}"
                             error("❌ Failed to query GitHub API: ${e.getMessage()}")
                         }
+                    }
+                    
+                    // Assign to environment variable after withCredentials block
+                    if (detectedPrNumber) {
+                        env.PR_NUMBER = detectedPrNumber
+                        echo "✅ PR_NUMBER set to: ${env.PR_NUMBER}"
+                    } else {
+                        echo "⚠️ Could not detect PR number, using default"
+                        env.PR_NUMBER = 'default'
                     }
                     
                     echo "Final PR Number: ${env.PR_NUMBER}"
