@@ -198,11 +198,23 @@ pipeline {
                                 ).trim()
                                 
                                 // Parse JSON response to get PR number
+                                echo "API Response length: ${response.length()}"
+                                echo "API Response (first 500 chars): ${response.take(500)}"
+                                
                                 def jsonResponse = new groovy.json.JsonSlurper().parseText(response)
-                                if (jsonResponse && jsonResponse.size() > 0 && jsonResponse[0].number) {
-                                    env.PR_NUMBER = jsonResponse[0].number.toString()
-                                    echo "✅ Found PR number from GitHub API: ${env.PR_NUMBER}"
+                                echo "Parsed JSON size: ${jsonResponse?.size() ?: 'null or not an array'}"
+                                
+                                if (jsonResponse && jsonResponse.size() > 0) {
+                                    echo "First PR object: ${jsonResponse[0]}"
+                                    if (jsonResponse[0].number) {
+                                        env.PR_NUMBER = jsonResponse[0].number.toString()
+                                        echo "✅ Found PR number from GitHub API: ${env.PR_NUMBER}"
+                                    } else {
+                                        echo "⚠️ PR object found but 'number' field is missing: ${jsonResponse[0]}"
+                                        error("❌ PR response missing 'number' field")
+                                    }
                                 } else {
+                                    echo "⚠️ API Response: ${response}"
                                     error("❌ No open PR found for branch: ${branchName}. Please create a PR first.")
                                 }
                             } else {
