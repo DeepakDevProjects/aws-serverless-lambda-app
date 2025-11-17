@@ -66,11 +66,27 @@ pipeline {
                     echo "Checking out Lambda App repository"
                     echo "============================================"
                     
-                    // Get branch name from git (works for regular Pipeline jobs)
-                    def branchName = sh(
-                        script: 'git rev-parse --abbrev-ref HEAD',
-                        returnStdout: true
-                    ).trim()
+                    // Try multiple sources to reliably determine the branch name
+                    def branchName = env.BRANCH_NAME ?: env.GIT_BRANCH
+                    
+                    if (!branchName || branchName.trim() == '' || branchName == 'detached') {
+                        // Fallback to git show-current (works if not in detached HEAD)
+                        branchName = sh(
+                            script: 'git branch --show-current 2>/dev/null || true',
+                            returnStdout: true
+                        ).trim()
+                    }
+                    
+                    if (!branchName || branchName.trim() == '' || branchName == 'HEAD') {
+                        // Final fallback: rev-parse (may return HEAD) or commit SHA
+                        branchName = sh(
+                            script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || git rev-parse --short HEAD',
+                            returnStdout: true
+                        ).trim()
+                    }
+                    
+                    // Normalize origin/ prefixes
+                    branchName = branchName?.replaceFirst(/^origin\\//, '')
                     
                     echo "Detected branch: ${branchName}"
                     
@@ -88,8 +104,8 @@ pipeline {
                         echo "Detected PR number from ghprbPullId: ${env.PR_NUMBER}"
                     } else {
                         // Extract PR number from branch name
-                        // Patterns: "feature/pr-222", "PR-123", "feature/test-pr-121", "feature/pr-222"
-                        def prMatch = branchName =~ /(?:pr|PR)[-_]?(\d+)/
+                        // Supports: feature/pr-222, PR-123, feature/test-pr-121, release-PR_456, etc.
+                        def prMatch = branchName =~ /(?i)pr[-_]?(\d+)/
                         if (prMatch) {
                             env.PR_NUMBER = prMatch[0][1]
                             echo "Extracted PR number from branch name: ${env.PR_NUMBER}"
