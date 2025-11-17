@@ -144,6 +144,12 @@ pipeline {
                     def detectedPrNumber = null
                     
                     // Step 1: Check webhook environment variables first
+                    echo "============================================"
+                    echo "DEBUG: Checking webhook environment variables"
+                    echo "DEBUG: env.CHANGE_ID = '${env.CHANGE_ID}'"
+                    echo "DEBUG: env.ghprbPullId = '${env.ghprbPullId}'"
+                    echo "============================================"
+                    
                     if (env.CHANGE_ID) {
                         detectedPrNumber = env.CHANGE_ID.toString().trim()
                         echo "✅ Found PR number from webhook (CHANGE_ID): ${detectedPrNumber}"
@@ -249,18 +255,36 @@ pipeline {
                         }
                     }
                     
+                    // Debug: Check detectedPrNumber right after withCredentials block
+                    echo "============================================"
+                    echo "DEBUG: After withCredentials block"
+                    echo "DEBUG: detectedPrNumber value: '${detectedPrNumber}'"
+                    echo "DEBUG: detectedPrNumber type: ${detectedPrNumber?.getClass()?.name}"
+                    echo "============================================"
+                    
                     // Set env.PR_NUMBER AFTER withCredentials block closes (or after webhook check)
                     // This ensures the environment variable persists correctly
+                    echo "============================================"
+                    echo "DEBUG: About to set env.PR_NUMBER"
+                    echo "DEBUG: detectedPrNumber value: '${detectedPrNumber}'"
+                    echo "DEBUG: detectedPrNumber type: ${detectedPrNumber?.getClass()?.name}"
+                    echo "DEBUG: detectedPrNumber is null? ${detectedPrNumber == null}"
+                    echo "DEBUG: detectedPrNumber is empty string? ${detectedPrNumber == ''}"
+                    echo "DEBUG: detectedPrNumber equals 'default'? ${detectedPrNumber == 'default'}"
+                    echo "============================================"
+                    
                     if (detectedPrNumber && detectedPrNumber != 'null' && detectedPrNumber != '' && detectedPrNumber != 'default') {
                         env.PR_NUMBER = detectedPrNumber.toString().trim()
                         echo "✅ PR_NUMBER set from detection result: ${env.PR_NUMBER}"
                     } else {
                         echo "⚠️ Could not detect PR number, using default"
+                        echo "⚠️ detectedPrNumber failed condition check"
                         env.PR_NUMBER = 'default'
                     }
                     
+                    echo "============================================"
                     echo "Final PR Number: ${env.PR_NUMBER}"
-                    echo "Branch Name: ${branchName}"
+                    echo "Final Branch Name: ${branchName}"
                     echo "============================================"
                 }
             }
