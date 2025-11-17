@@ -58,24 +58,37 @@ pipeline {
          */
         stage('Checkout Lambda App Code') {
             steps {
+                // Checkout the branch that triggered the webhook
+                checkout scm
+                
                 script {
                     echo "============================================"
                     echo "Checking out Lambda App repository"
-                    echo "Branch: ${env.BRANCH_NAME ?: 'unknown'}"
-                    echo "Change ID (PR): ${env.CHANGE_ID ?: 'not a PR'}"
                     echo "============================================"
                     
-                    // Extract PR number from branch name or use CHANGE_ID
-                    def branchName = env.BRANCH_NAME ?: 'default'
+                    // Get branch name from git (works for regular Pipeline jobs)
+                    def branchName = sh(
+                        script: 'git rev-parse --abbrev-ref HEAD',
+                        returnStdout: true
+                    ).trim()
+                    
+                    echo "Detected branch: ${branchName}"
+                    
+                    // Try to get PR number from environment (if set by webhook)
                     def changeId = env.CHANGE_ID
+                    def ghprbPullId = env.ghprbPullId  // GitHub Pull Request Builder plugin
                     
                     if (changeId) {
-                        // This is a PR - use CHANGE_ID
+                        // PR number from Multibranch Pipeline or webhook
                         env.PR_NUMBER = changeId
                         echo "Detected PR number from CHANGE_ID: ${env.PR_NUMBER}"
+                    } else if (ghprbPullId) {
+                        // PR number from GitHub Pull Request Builder plugin
+                        env.PR_NUMBER = ghprbPullId
+                        echo "Detected PR number from ghprbPullId: ${env.PR_NUMBER}"
                     } else {
                         // Extract PR number from branch name
-                        // Patterns: "feature/pr-222", "PR-123", "feature/test-pr-121"
+                        // Patterns: "feature/pr-222", "PR-123", "feature/test-pr-121", "feature/pr-222"
                         def prMatch = branchName =~ /(?:pr|PR)[-_]?(\d+)/
                         if (prMatch) {
                             env.PR_NUMBER = prMatch[0][1]
@@ -88,9 +101,9 @@ pipeline {
                     }
                     
                     echo "Final PR Number: ${env.PR_NUMBER}"
+                    echo "Branch Name: ${branchName}"
                     echo "============================================"
                 }
-                checkout scm
             }
         }
         
