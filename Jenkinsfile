@@ -567,17 +567,34 @@ EOF
                         echo "Using AWS CLI at: ${AWS_CLI}"
                         ${AWS_CLI} --version
                         
-                        # Read S3 bucket name from infra repo config
-                        S3_BUCKET=$(cat ${INFRA_REPO_DIR}/config/pr-${PR_NUMBER}/config.json | grep -o '"s3BucketName": "[^"]*' | cut -d'"' -f4)
+                        STACK_NAME="InfrastructureStack-${PR_NUMBER}"
                         LAMBDA_FUNCTION_NAME="api-processor-lambda-pr-${PR_NUMBER}"
+                        
+                        # Get actual S3 bucket name from CloudFormation stack outputs
+                        # This ensures we use the correct bucket name (with account ID suffix if applicable)
+                        S3_BUCKET=$(${AWS_CLI} cloudformation describe-stacks \
+                            --stack-name ${STACK_NAME} \
+                            --query 'Stacks[0].Outputs[?OutputKey==`S3BucketName`].OutputValue' \
+                            --output text \
+                            --region us-east-1 2>/dev/null || echo "")
+                        
+                        # Fallback to config file if stack output not available
+                        if [ -z "${S3_BUCKET}" ] || [ "${S3_BUCKET}" = "None" ]; then
+                            echo "Could not get S3 bucket from stack outputs, trying config file..."
+                            S3_BUCKET=$(cat ${INFRA_REPO_DIR}/config/pr-${PR_NUMBER}/config.json | grep -o '"s3BucketName": "[^"]*' | cut -d'"' -f4 || echo "")
+                        fi
                         
                         echo "S3 Bucket: ${S3_BUCKET}"
                         echo "Lambda Function: ${LAMBDA_FUNCTION_NAME}"
                         
                         # Upload Lambda package to S3 (temporary storage)
-                        ${AWS_CLI} s3 cp lambda-function-pr-${PR_NUMBER}.zip s3://${S3_BUCKET}/lambda-code/ || {
-                            echo "S3 bucket may not exist yet, trying direct Lambda update..."
-                        }
+                        if [ -n "${S3_BUCKET}" ] && [ "${S3_BUCKET}" != "None" ]; then
+                            ${AWS_CLI} s3 cp lambda-function-pr-${PR_NUMBER}.zip s3://${S3_BUCKET}/lambda-code/ || {
+                                echo "S3 upload failed, trying direct Lambda update..."
+                            }
+                        else
+                            echo "S3 bucket name not available, skipping S3 upload, trying direct Lambda update..."
+                        fi
                         
                         # Check if Lambda function exists
                         if ${AWS_CLI} lambda get-function --function-name ${LAMBDA_FUNCTION_NAME} 2>/dev/null; then
