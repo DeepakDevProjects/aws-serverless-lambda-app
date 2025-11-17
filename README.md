@@ -40,6 +40,10 @@ npm install
 
 Deployment will be handled via Jenkins pipeline (coming soon).
 
+### Jenkins trigger note
+
+Automated test update to verify PR branch detection at 2025-11-17 21:35:00.
+
 Thank you
 Thank you again
 jhbjhjgvgvgv jhgjsdg
