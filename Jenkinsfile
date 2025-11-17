@@ -273,14 +273,22 @@ pipeline {
                     echo "DEBUG: detectedPrNumber equals 'default'? ${detectedPrNumber == 'default'}"
                     echo "============================================"
                     
-                    if (detectedPrNumber && detectedPrNumber != 'null' && detectedPrNumber != '' && detectedPrNumber != 'default') {
-                        env.PR_NUMBER = detectedPrNumber.toString().trim()
-                        echo "✅ PR_NUMBER set from detection result: ${env.PR_NUMBER}"
+                    // Explicitly check and set PR_NUMBER
+                    def finalPrNumber = 'default'
+                    if (detectedPrNumber != null) {
+                        def prStr = detectedPrNumber.toString().trim()
+                        if (prStr && prStr != '' && prStr != 'null' && prStr != 'default') {
+                            finalPrNumber = prStr
+                            echo "✅ Condition passed - using detected PR number: ${finalPrNumber}"
+                        } else {
+                            echo "⚠️ detectedPrNumber string is invalid: '${prStr}'"
+                        }
                     } else {
-                        echo "⚠️ Could not detect PR number, using default"
-                        echo "⚠️ detectedPrNumber failed condition check"
-                        env.PR_NUMBER = 'default'
+                        echo "⚠️ detectedPrNumber is null"
                     }
+                    
+                    env.PR_NUMBER = finalPrNumber
+                    echo "✅ PR_NUMBER set to: ${env.PR_NUMBER}"
                     
                     echo "============================================"
                     echo "Final PR Number: ${env.PR_NUMBER}"
