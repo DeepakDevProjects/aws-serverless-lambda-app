@@ -149,22 +149,35 @@ pipeline {
                             echo "Repository URL: ${repoUrl}"
                             
                             // Extract owner/repo from URL (handles both https:// and git@ formats)
-                            // Pattern matches: github.com:owner/repo or github.com/owner/repo
+                            // Use simple string manipulation to avoid regex parsing issues
                             def owner = null
                             def repo = null
                             
-                            // Try https:// format first (matches github.com/owner/repo or github.com:owner/repo)
-                            // Use string pattern to avoid character class parsing issues in slashy strings
-                            def httpsMatch = repoUrl =~ "github\\.com(?:[:]|/)([^/]+)/([^/]+?)(?:\\.git)?\\\$"
-                            if (httpsMatch.find()) {
-                                owner = httpsMatch.group(1)
-                                repo = httpsMatch.group(2)
-                            } else {
-                                // Try git@ format (matches git@github.com:owner/repo)
-                                def sshMatch = repoUrl =~ /git@github\.com[:]([^\/]+)\/([^\/]+?)(?:\.git)?$/
-                                if (sshMatch.find()) {
-                                    owner = sshMatch.group(1)
-                                    repo = sshMatch.group(2)
+                            // Remove protocol and .git suffix using string operations
+                            def cleanUrl = repoUrl
+                            if (cleanUrl.startsWith('https://')) {
+                                cleanUrl = cleanUrl.substring(8)  // Remove 'https://'
+                            } else if (cleanUrl.startsWith('http://')) {
+                                cleanUrl = cleanUrl.substring(7)  // Remove 'http://'
+                            } else if (cleanUrl.startsWith('git@')) {
+                                cleanUrl = cleanUrl.substring(4)   // Remove 'git@'
+                            }
+                            if (cleanUrl.endsWith('.git')) {
+                                cleanUrl = cleanUrl.substring(0, cleanUrl.length() - 4)  // Remove '.git'
+                            }
+                            
+                            // Extract owner/repo from github.com/owner/repo or github.com:owner/repo
+                            def githubIndex = cleanUrl.indexOf('github.com')
+                            if (githubIndex >= 0) {
+                                def afterGithub = cleanUrl.substring(githubIndex + 10)  // Skip 'github.com'
+                                // Remove leading : or /
+                                if (afterGithub.startsWith(':') || afterGithub.startsWith('/')) {
+                                    afterGithub = afterGithub.substring(1)
+                                }
+                                def ownerRepoParts = afterGithub.split('/')
+                                if (ownerRepoParts.size() >= 2) {
+                                    owner = ownerRepoParts[0]
+                                    repo = ownerRepoParts[1]
                                 }
                             }
                             
