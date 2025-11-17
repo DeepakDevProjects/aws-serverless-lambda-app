@@ -39,7 +39,8 @@ pipeline {
     // Environment variables available throughout the pipeline
     environment {
         // PR_NUMBER will be set in the first stage from branch name or CHANGE_ID
-        PR_NUMBER = 'default'
+        // NOTE: Do NOT initialize PR_NUMBER here - it will be set dynamically in Stage 1
+        // If we initialize it here, it cannot be overridden in script blocks
         
         // AWS credentials (set in Jenkins Credentials Store)
         AWS_CREDENTIALS_ID = 'aws-credentials'
@@ -72,6 +73,9 @@ pipeline {
         stage('Checkout Lambda App Code') {
             steps {
                 script {
+                    // Initialize PR_NUMBER to default (will be overridden if detection succeeds)
+                    env.PR_NUMBER = 'default'
+                    
                     echo "============================================"
                     echo "Checking out Lambda App repository"
                     echo "============================================"
