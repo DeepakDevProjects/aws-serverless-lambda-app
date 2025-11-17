@@ -171,10 +171,12 @@ pipeline {
                                 ).trim()
                                 
                                 // Extract owner/repo from URL (handles both https and git@ formats)
-                                def repoMatch = repoUrl =~ /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/
+                                // Pattern matches: github.com:owner/repo or github.com/owner/repo
+                                // Using string pattern to avoid issues with character class in slashy string
+                                def repoMatch = repoUrl =~ "github\\.com[:/]([^/]+)/([^/]+?)(?:\\.git)?\\\$"
                                 if (repoMatch.find()) {
-                                    def owner = repoMatch.group(1)
-                                    def repo = repoMatch.group(2)
+                                    def owner = repoMatch.group(1)  // Group 1 is owner
+                                    def repo = repoMatch.group(2)   // Group 2 is repo
                                     
                                     echo "Repository: ${owner}/${repo}"
                                     
