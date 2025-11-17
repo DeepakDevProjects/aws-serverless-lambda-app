@@ -135,54 +135,127 @@ pipeline {
                     
                     echo "Detected branch: ${branchName}"
                     
-                    // Try to get PR number from environment (if set by webhook)
+                    // Priority order for PR number detection:
+                    // 1. Webhook environment variables (CHANGE_ID, ghprbPullId) - most reliable
+                    // 2. GitHub API call - finds real PR number for any branch name
+                    // 3. Extract from branch name patterns - fallback if API fails
+                    // 4. Unique identifier - last resort
+                    
                     def changeId = env.CHANGE_ID
                     def ghprbPullId = env.ghprbPullId  // GitHub Pull Request Builder plugin
+                    def found = false
                     
+                    // Step 1: Check webhook environment variables (highest priority)
                     if (changeId) {
                         // PR number from Multibranch Pipeline or webhook
                         env.PR_NUMBER = changeId
-                        echo "Detected PR number from CHANGE_ID: ${env.PR_NUMBER}"
+                        echo "✅ Detected PR number from CHANGE_ID (webhook): ${env.PR_NUMBER}"
+                        found = true
                     } else if (ghprbPullId) {
                         // PR number from GitHub Pull Request Builder plugin
                         env.PR_NUMBER = ghprbPullId
-                        echo "Detected PR number from ghprbPullId: ${env.PR_NUMBER}"
-                    } else {
-                        // Try multiple patterns to extract PR number from branch name
-                        // Supports: feature/pr-222, PR-123, feature/test-pr-121, release-PR_456, 
-                        //           bugfix-123, hotfix-456, issue-789, ticket-123, etc.
+                        echo "✅ Detected PR number from ghprbPullId (webhook): ${env.PR_NUMBER}"
+                        found = true
+                    }
+                    
+                    // Step 2: If webhook didn't provide PR number, query GitHub API
+                    if (!found) {
+                        echo "Webhook did not provide PR number. Querying GitHub API to find PR for branch: ${branchName}"
+                        
+                        withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
+                            try {
+                                // Get repository owner and name from git remote
+                                def repoUrl = sh(
+                                    script: 'git config --get remote.origin.url',
+                                    returnStdout: true
+                                ).trim()
+                                
+                                // Extract owner/repo from URL (handles both https and git@ formats)
+                                def repoMatch = repoUrl =~ /github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/
+                                if (repoMatch.find()) {
+                                    def owner = repoMatch.group(1)
+                                    def repo = repoMatch.group(2)
+                                    
+                                    echo "Repository: ${owner}/${repo}"
+                                    
+                                    // Query GitHub API for open PRs with this branch as head
+                                    def apiUrl = "https://api.github.com/repos/${owner}/${repo}/pulls?head=${owner}:${branchName}&state=open"
+                                    echo "API URL: ${apiUrl}"
+                                    
+                                    def response = sh(
+                                        script: """
+                                            curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+                                                 -H "Accept: application/vnd.github.v3+json" \
+                                                 "${apiUrl}"
+                                        """,
+                                        returnStdout: true
+                                    ).trim()
+                                    
+                                    // Parse JSON response to get PR number
+                                    // Use Groovy's JsonSlurper for JSON parsing
+                                    def jsonResponse = new groovy.json.JsonSlurper().parseText(response)
+                                    if (jsonResponse && jsonResponse.size() > 0 && jsonResponse[0].number) {
+                                        env.PR_NUMBER = jsonResponse[0].number.toString()
+                                        echo "✅ Found PR number from GitHub API: ${env.PR_NUMBER}"
+                                        found = true
+                                    } else {
+                                        echo "⚠️ No open PR found for branch: ${branchName}"
+                                    }
+                                } else {
+                                    echo "⚠️ Could not parse repository URL: ${repoUrl}"
+                                }
+                            } catch (Exception e) {
+                                echo "⚠️ Failed to query GitHub API: ${e.getMessage()}"
+                                echo "Will try branch name extraction as fallback"
+                            }
+                        }
+                    }
+                    
+                    // Step 3: If API call failed, try extracting from branch name patterns
+                    if (!found) {
+                        echo "Trying to extract PR number from branch name patterns..."
                         def prMatch = null
                         
                         // Pattern 1: pr-123, PR-123, pr_123, PR_123
                         prMatch = branchName =~ /(?i)pr[-_]?(\d+)/
-                        if (prMatch) {
-                            env.PR_NUMBER = prMatch[0][1]
-                            echo "Extracted PR number from branch name (pattern: pr-XXX): ${env.PR_NUMBER}"
-                        } else {
+                        if (prMatch.find()) {
+                            env.PR_NUMBER = prMatch.group(1)
+                            echo "✅ Extracted PR number from branch name (pattern: pr-XXX): ${env.PR_NUMBER}"
+                            found = true
+                        }
+                        
+                        if (!found) {
                             // Pattern 2: Any standalone number (e.g., bugfix-123, issue-456)
                             prMatch = branchName =~ /[-_](\d+)$/
-                            if (prMatch) {
-                                env.PR_NUMBER = prMatch[0][1]
-                                echo "Extracted PR number from branch name (pattern: XXX-123): ${env.PR_NUMBER}"
-                            } else {
-                                // Pattern 3: Any number in the branch name
-                                prMatch = branchName =~ /(\d+)/
-                                if (prMatch) {
-                                    env.PR_NUMBER = prMatch[0][1]
-                                    echo "Extracted number from branch name: ${env.PR_NUMBER}"
-                                } else {
-                                    // No number found - create a unique identifier from branch name
-                                    // Use first 20 chars of sanitized branch name + short commit hash
-                                    def shortHash = sh(
-                                        script: 'git rev-parse --short HEAD 2>/dev/null || echo "unknown"',
-                                        returnStdout: true
-                                    ).trim()
-                                    def sanitized = branchName.replaceAll(/[^a-zA-Z0-9]/, '-').take(20)
-                                    env.PR_NUMBER = "${sanitized}-${shortHash}"
-                                    echo "No PR number found in branch name. Using unique identifier: ${env.PR_NUMBER}"
-                                }
+                            if (prMatch.find()) {
+                                env.PR_NUMBER = prMatch.group(1)
+                                echo "✅ Extracted PR number from branch name (pattern: XXX-123): ${env.PR_NUMBER}"
+                                found = true
                             }
                         }
+                        
+                        if (!found) {
+                            // Pattern 3: Any number in the branch name
+                            prMatch = branchName =~ /(\d+)/
+                            if (prMatch.find()) {
+                                env.PR_NUMBER = prMatch.group(1)
+                                echo "✅ Extracted number from branch name: ${env.PR_NUMBER}"
+                                found = true
+                            }
+                        }
+                    }
+                    
+                    // Step 4: Last resort - create unique identifier
+                    if (!found) {
+                        // No PR number found anywhere - create a unique identifier from branch name
+                        // Use first 20 chars of sanitized branch name + short commit hash
+                        def shortHash = sh(
+                            script: 'git rev-parse --short HEAD 2>/dev/null || echo "unknown"',
+                            returnStdout: true
+                        ).trim()
+                        def sanitized = branchName.replaceAll(/[^a-zA-Z0-9]/, '-').take(20)
+                        env.PR_NUMBER = "${sanitized}-${shortHash}"
+                        echo "⚠️ No PR number found. Using unique identifier: ${env.PR_NUMBER}"
                     }
                     
                     echo "Final PR Number: ${env.PR_NUMBER}"
