@@ -84,8 +84,36 @@ exports.handler = async (event, context) => {
         const apiUrl = process.env.API_URL || 'https://jsonplaceholder.typicode.com/posts/1';
         console.log('Making API call to:', apiUrl);
         
-        const response = await fetch(apiUrl);
-        const apiData = await response.json();
+        const response = await fetch(apiUrl, {
+            headers: {
+                'Accept': 'application/json',
+                'User-Agent': 'lambda-api-client/1.0'
+            }
+        });
+
+        const contentType = response.headers.get('content-type') || '';
+        const responseBody = await response.text();
+
+        if (!response.ok) {
+            console.error(`API request failed with status ${response.status}`);
+            console.error('Response body preview:', responseBody.slice(0, 500));
+            throw new Error(`API request failed with status ${response.status}`);
+        }
+
+        let apiData;
+        try {
+            if (contentType.includes('application/json')) {
+                apiData = JSON.parse(responseBody);
+            } else {
+                throw new Error(`Unexpected content-type: ${contentType}`);
+            }
+        } catch (parseError) {
+            console.error('Failed to parse API response as JSON');
+            console.error('Content-Type:', contentType);
+            console.error('Response body preview:', responseBody.slice(0, 500));
+            throw new Error(`API response was not valid JSON: ${parseError.message}`);
+        }
+
         console.log('API response received:', JSON.stringify(apiData, null, 2));
         
         /**
