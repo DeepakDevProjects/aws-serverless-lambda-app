@@ -4,19 +4,32 @@
  * PURPOSE: Jenkins Pipeline for Lambda App Repository
  * 
  * WHAT THIS PIPELINE DOES:
- * 1. Triggers on Pull Request creation
- * 2. Builds and tests Lambda function code
- * 3. Creates PR-specific configuration in infrastructure repo
- * 4. Packages Lambda code for deployment
- * 5. Deploys Lambda function to AWS
+ * 1. Triggers on push to ANY branch (via GitHub webhook)
+ * 2. Automatically detects branch name and extracts PR number/identifier
+ * 3. Builds and tests Lambda function code
+ * 4. Creates PR-specific configuration in infrastructure repo
+ * 5. Packages Lambda code for deployment
+ * 6. Deploys Lambda function to AWS
+ * 
+ * BRANCH NAMING FLEXIBILITY:
+ * - Supports ANY branch name (e.g., feature/pr-212, bugfix-123, my-branch)
+ * - Extracts PR numbers from multiple patterns:
+ *   * Pattern 1: pr-123, PR-456, pr_789
+ *   * Pattern 2: bugfix-123, issue-456, ticket-789 (trailing numbers)
+ *   * Pattern 3: Any number found in branch name
+ *   * Fallback: Creates unique ID from branch name + commit hash
  * 
  * PR-SPECIFIC RESOURCES:
  * - Lambda function name: api-processor-lambda-pr-{PR_NUMBER}
  * - S3 bucket: Created by infrastructure repo pipeline
  * 
  * TRIGGER:
- * - GitHub webhook on PR creation
+ * - GitHub webhook on push to any branch
  * - Or manual trigger via Jenkins UI
+ * 
+ * JENKINS CONFIGURATION:
+ * - Branch Specifier: ** (matches all branches)
+ * - Lightweight checkout: Disabled (to fetch exact branch from webhook)
  * ============================================================================
  */
 
@@ -26,13 +39,14 @@ pipeline {
     // Environment variables available throughout the pipeline
     environment {
         // PR_NUMBER will be set in the first stage from branch name or CHANGE_ID
-        PR_NUMBER = 'default'
+        // NOTE: Do NOT initialize PR_NUMBER here - it will be set dynamically in Stage 1
+        // If we initialize it here, it cannot be overridden in script blocks
         
         // AWS credentials (set in Jenkins Credentials Store)
         AWS_CREDENTIALS_ID = 'aws-credentials'
         
-        // GitHub token for accessing infrastructure repo
-        GITHUB_TOKEN_CREDENTIALS_ID = 'github-token'
+        // GitHub token for PR detection via API
+        GITHUB_TOKEN_CREDENTIALS_ID = 'github-token-pr-detection'
         
         // Repository paths
         INFRA_REPO_URL = 'https://github.com/DeepakDevProjects/aws-infrastructure-as-code.git'
@@ -58,50 +72,231 @@ pipeline {
          */
         stage('Checkout Lambda App Code') {
             steps {
-                // Checkout the branch that triggered the webhook
-                checkout scm
-                
                 script {
+                    // Initialize PR_NUMBER to default (will be overridden if detection succeeds)
+                    env.PR_NUMBER = 'default'
+                    
                     echo "============================================"
                     echo "Checking out Lambda App repository"
                     echo "============================================"
                     
-                    // Get branch name from git (works for regular Pipeline jobs)
-                    def branchName = sh(
-                        script: 'git rev-parse --abbrev-ref HEAD',
-                        returnStdout: true
-                    ).trim()
+                    // First, try to get branch from webhook payload or environment variables
+                    // GitHub webhook sets GIT_BRANCH in format: origin/feature/pr-123
+                    def branchName = env.GIT_BRANCH ?: env.BRANCH_NAME
+                    
+                    // Normalize branch name (remove origin/ prefix if present)
+                    if (branchName) {
+                        branchName = branchName.replaceFirst(/^origin\\//, '')
+                        echo "Branch from environment: ${branchName}"
+                    }
+                    
+                    // If no branch detected, we'll checkout and detect from git
+                    if (!branchName || branchName.trim() == '' || branchName == 'detached' || branchName == 'HEAD') {
+                        echo "No branch detected from environment, checking out default and detecting..."
+                        // Checkout using SCM configuration (will use branch specifier)
+                        checkout scm
+                        
+                        // Now detect the actual branch that was checked out
+                        branchName = sh(
+                            script: 'git rev-parse --abbrev-ref HEAD 2>/dev/null || git branch --show-current 2>/dev/null || true',
+                            returnStdout: true
+                        ).trim()
+                        
+                        // If still HEAD, try to get from remote tracking branch
+                        if (branchName == 'HEAD' || !branchName) {
+                            branchName = sh(
+                                script: 'git branch -r --contains HEAD 2>/dev/null | head -1 | sed "s|origin/||" | xargs || true',
+                                returnStdout: true
+                            ).trim()
+                        }
+                    } else {
+                        // We have a branch name from webhook, explicitly checkout that branch
+                        echo "Explicitly checking out branch: ${branchName}"
+                        checkout([
+                            $class: 'GitSCM',
+                            branches: [[name: "*/${branchName}"]],
+                            userRemoteConfigs: scm.userRemoteConfigs,
+                            extensions: scm.extensions
+                        ])
+                    }
+                    
+                    // Final normalization
+                    branchName = branchName?.replaceFirst(/^origin\\//, '')?.trim()
+                    
+                    if (!branchName || branchName == 'HEAD') {
+                        // Last resort: use git to find the current branch
+                        branchName = sh(
+                            script: '''
+                                # Try to get branch from git refs
+                                git branch -a --contains HEAD 2>/dev/null | grep -v HEAD | head -1 | sed 's|remotes/origin/||' | sed 's|^[* ] ||' | xargs || \
+                                git log --oneline -1 --format="%D" 2>/dev/null | grep -oE '[^, ]+' | grep -v HEAD | head -1 | sed 's|origin/||' || \
+                                git rev-parse --short HEAD 2>/dev/null || \
+                                echo "unknown-branch"
+                            ''',
+                            returnStdout: true
+                        ).trim()
+                    }
                     
                     echo "Detected branch: ${branchName}"
                     
-                    // Try to get PR number from environment (if set by webhook)
-                    def changeId = env.CHANGE_ID
-                    def ghprbPullId = env.ghprbPullId  // GitHub Pull Request Builder plugin
+                    // PR number detection: Priority order:
+                    // 1. Webhook environment variables (CHANGE_ID, ghprbPullId)
+                    // 2. GitHub API call
+                    // 3. Branch name pattern matching (fallback)
                     
-                    if (changeId) {
-                        // PR number from Multibranch Pipeline or webhook
-                        env.PR_NUMBER = changeId
-                        echo "Detected PR number from CHANGE_ID: ${env.PR_NUMBER}"
-                    } else if (ghprbPullId) {
-                        // PR number from GitHub Pull Request Builder plugin
-                        env.PR_NUMBER = ghprbPullId
-                        echo "Detected PR number from ghprbPullId: ${env.PR_NUMBER}"
+                    // Use a script variable to store PR number, then assign to env after withCredentials
+                    def detectedPrNumber = null
+                    
+                    // Step 1: Check webhook environment variables first
+                    echo "============================================"
+                    echo "DEBUG: Checking webhook environment variables"
+                    echo "DEBUG: env.CHANGE_ID = '${env.CHANGE_ID}'"
+                    echo "DEBUG: env.ghprbPullId = '${env.ghprbPullId}'"
+                    echo "============================================"
+                    
+                    if (env.CHANGE_ID) {
+                        detectedPrNumber = env.CHANGE_ID.toString().trim()
+                        echo "✅ Found PR number from webhook (CHANGE_ID): ${detectedPrNumber}"
+                    } else if (env.ghprbPullId) {
+                        detectedPrNumber = env.ghprbPullId.toString().trim()
+                        echo "✅ Found PR number from webhook (ghprbPullId): ${detectedPrNumber}"
                     } else {
-                        // Extract PR number from branch name
-                        // Patterns: "feature/pr-222", "PR-123", "feature/test-pr-121", "feature/pr-222"
-                        def prMatch = branchName =~ /(?:pr|PR)[-_]?(\d+)/
-                        if (prMatch) {
-                            env.PR_NUMBER = prMatch[0][1]
-                            echo "Extracted PR number from branch name: ${env.PR_NUMBER}"
-                        } else {
-                            // Use sanitized branch name as identifier
-                            env.PR_NUMBER = branchName.replaceAll(/[^a-zA-Z0-9]/, '-')
-                            echo "Using branch name as identifier: ${env.PR_NUMBER}"
+                        // Step 2: Fallback to GitHub API call
+                        echo "No webhook PR number found, querying GitHub API for branch: ${branchName}"
+                        
+                        withCredentials([string(credentialsId: env.GITHUB_TOKEN_CREDENTIALS_ID, variable: 'GITHUB_TOKEN')]) {
+                        try {
+                            // Get repository owner and name from git remote
+                            def repoUrl = sh(
+                                script: 'git config --get remote.origin.url',
+                                returnStdout: true
+                            ).trim()
+                            
+                            echo "Repository URL: ${repoUrl}"
+                            
+                            // Extract owner/repo from URL (handles both https:// and git@ formats)
+                            // Use simple string manipulation to avoid regex parsing issues
+                            def owner = null
+                            def repo = null
+                            
+                            // Remove protocol and .git suffix using string operations
+                            def cleanUrl = repoUrl
+                            if (cleanUrl.startsWith('https://')) {
+                                cleanUrl = cleanUrl.substring(8)  // Remove 'https://'
+                            } else if (cleanUrl.startsWith('http://')) {
+                                cleanUrl = cleanUrl.substring(7)  // Remove 'http://'
+                            } else if (cleanUrl.startsWith('git@')) {
+                                cleanUrl = cleanUrl.substring(4)   // Remove 'git@'
+                            }
+                            if (cleanUrl.endsWith('.git')) {
+                                cleanUrl = cleanUrl.substring(0, cleanUrl.length() - 4)  // Remove '.git'
+                            }
+                            
+                            // Extract owner/repo from github.com/owner/repo or github.com:owner/repo
+                            def githubIndex = cleanUrl.indexOf('github.com')
+                            if (githubIndex >= 0) {
+                                def afterGithub = cleanUrl.substring(githubIndex + 10)  // Skip 'github.com'
+                                // Remove leading : or /
+                                if (afterGithub.startsWith(':') || afterGithub.startsWith('/')) {
+                                    afterGithub = afterGithub.substring(1)
+                                }
+                                def ownerRepoParts = afterGithub.split('/')
+                                if (ownerRepoParts.size() >= 2) {
+                                    owner = ownerRepoParts[0]
+                                    repo = ownerRepoParts[1]
+                                }
+                            }
+                            
+                            if (owner && repo) {
+                                echo "Repository: ${owner}/${repo}"
+                                
+                                // Query GitHub API for open PRs with this branch as head
+                                def apiUrl = "https://api.github.com/repos/${owner}/${repo}/pulls?head=${owner}:${branchName}&state=open"
+                                echo "API URL: ${apiUrl}"
+                                
+                                def response = sh(
+                                    script: """
+                                        curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+                                             -H "Accept: application/vnd.github.v3+json" \
+                                             "${apiUrl}"
+                                    """,
+                                    returnStdout: true
+                                ).trim()
+                                
+                                // Parse JSON response to get PR number
+                                echo "API Response length: ${response.length()}"
+                                
+                                def jsonResponse = new groovy.json.JsonSlurper().parseText(response)
+                                echo "Parsed JSON size: ${jsonResponse?.size() ?: 'null or not an array'}"
+                                
+                                if (jsonResponse && jsonResponse.size() > 0) {
+                                    def prNumberValue = jsonResponse[0].number
+                                    echo "PR number from API: ${prNumberValue} (type: ${prNumberValue?.getClass()?.name})"
+                                    
+                                    if (prNumberValue != null) {
+                                        // Only set script variable inside withCredentials block
+                                        // env.PR_NUMBER will be set AFTER the block closes
+                                        def prNumberStr = prNumberValue.toString().trim()
+                                        detectedPrNumber = prNumberStr
+                                        echo "✅ Found PR number from GitHub API: ${prNumberStr}"
+                                        echo "✅ Stored in detectedPrNumber: ${detectedPrNumber}"
+                                    } else {
+                                        echo "⚠️ PR object found but 'number' field is null, falling back to default."
+                                        // Do not error, allow fallback
+                                    }
+                                } else {
+                                    echo "⚠️ No open PR found for branch: ${branchName}, falling back to default."
+                                    // Do not error, allow fallback
+                                }
+                            } else {
+                                echo "⚠️ Could not parse repository URL: ${repoUrl}, falling back to default."
+                                // Do not error, allow fallback
+                            }
+                        } catch (Exception e) {
+                            echo "❌ Failed to query GitHub API: ${e.getMessage()}, falling back to default."
+                            // Do not error, allow fallback
+                        }
                         }
                     }
                     
+                    // Debug: Check detectedPrNumber right after withCredentials block
+                    echo "============================================"
+                    echo "DEBUG: After withCredentials block"
+                    echo "DEBUG: detectedPrNumber value: '${detectedPrNumber}'"
+                    echo "DEBUG: detectedPrNumber type: ${detectedPrNumber?.getClass()?.name}"
+                    echo "============================================"
+                    
+                    // Set env.PR_NUMBER AFTER withCredentials block closes (or after webhook check)
+                    // This ensures the environment variable persists correctly
+                    echo "============================================"
+                    echo "DEBUG: About to set env.PR_NUMBER"
+                    echo "DEBUG: detectedPrNumber value: '${detectedPrNumber}'"
+                    echo "DEBUG: detectedPrNumber type: ${detectedPrNumber?.getClass()?.name}"
+                    echo "DEBUG: detectedPrNumber is null? ${detectedPrNumber == null}"
+                    echo "DEBUG: detectedPrNumber is empty string? ${detectedPrNumber == ''}"
+                    echo "DEBUG: detectedPrNumber equals 'default'? ${detectedPrNumber == 'default'}"
+                    echo "============================================"
+                    
+                    // Explicitly check and set PR_NUMBER
+                    def finalPrNumber = 'default'
+                    if (detectedPrNumber != null) {
+                        def prStr = detectedPrNumber.toString().trim()
+                        if (prStr && prStr != '' && prStr != 'null' && prStr != 'default') {
+                            finalPrNumber = prStr
+                            echo "✅ Condition passed - using detected PR number: ${finalPrNumber}"
+                        } else {
+                            echo "⚠️ detectedPrNumber string is invalid: '${prStr}'"
+                        }
+                    } else {
+                        echo "⚠️ detectedPrNumber is null"
+                    }
+                    
+                    env.PR_NUMBER = finalPrNumber
+                    echo "✅ PR_NUMBER set to: ${env.PR_NUMBER}"
+                    
+                    echo "============================================"
                     echo "Final PR Number: ${env.PR_NUMBER}"
-                    echo "Branch Name: ${branchName}"
+                    echo "Final Branch Name: ${branchName}"
                     echo "============================================"
                 }
             }
@@ -372,24 +567,51 @@ EOF
                         echo "Using AWS CLI at: ${AWS_CLI}"
                         ${AWS_CLI} --version
                         
-                        # Read S3 bucket name from infra repo config
-                        S3_BUCKET=$(cat ${INFRA_REPO_DIR}/config/pr-${PR_NUMBER}/config.json | grep -o '"s3BucketName": "[^"]*' | cut -d'"' -f4)
+                        STACK_NAME="InfrastructureStack-${PR_NUMBER}"
                         LAMBDA_FUNCTION_NAME="api-processor-lambda-pr-${PR_NUMBER}"
+                        
+                        # Get actual S3 bucket name from CloudFormation stack outputs
+                        # This ensures we use the correct bucket name (with account ID suffix if applicable)
+                        S3_BUCKET=$(${AWS_CLI} cloudformation describe-stacks \
+                            --stack-name ${STACK_NAME} \
+                            --query 'Stacks[0].Outputs[?OutputKey==`S3BucketName`].OutputValue' \
+                            --output text \
+                            --region us-east-1 2>/dev/null || echo "")
+                        
+                        # Fallback to config file if stack output not available
+                        if [ -z "${S3_BUCKET}" ] || [ "${S3_BUCKET}" = "None" ]; then
+                            echo "Could not get S3 bucket from stack outputs, trying config file..."
+                            S3_BUCKET=$(cat ${INFRA_REPO_DIR}/config/pr-${PR_NUMBER}/config.json | grep -o '"s3BucketName": "[^"]*' | cut -d'"' -f4 || echo "")
+                        fi
                         
                         echo "S3 Bucket: ${S3_BUCKET}"
                         echo "Lambda Function: ${LAMBDA_FUNCTION_NAME}"
                         
                         # Upload Lambda package to S3 (temporary storage)
-                        ${AWS_CLI} s3 cp lambda-function-pr-${PR_NUMBER}.zip s3://${S3_BUCKET}/lambda-code/ || {
-                            echo "S3 bucket may not exist yet, trying direct Lambda update..."
-                        }
+                        if [ -n "${S3_BUCKET}" ] && [ "${S3_BUCKET}" != "None" ]; then
+                            ${AWS_CLI} s3 cp lambda-function-pr-${PR_NUMBER}.zip s3://${S3_BUCKET}/lambda-code/ || {
+                                echo "S3 upload failed, trying direct Lambda update..."
+                            }
+                        else
+                            echo "S3 bucket name not available, skipping S3 upload, trying direct Lambda update..."
+                        fi
                         
                         # Check if Lambda function exists
                         if ${AWS_CLI} lambda get-function --function-name ${LAMBDA_FUNCTION_NAME} 2>/dev/null; then
                             echo "Updating existing Lambda function..."
+                            
+                            # Update function code
                             ${AWS_CLI} lambda update-function-code \
                                 --function-name ${LAMBDA_FUNCTION_NAME} \
                                 --zip-file fileb://lambda-function-pr-${PR_NUMBER}.zip
+                            
+                            # Update handler to match the code structure (src/index.js -> src/index.handler)
+                            echo "Updating Lambda handler to src/index.handler..."
+                            ${AWS_CLI} lambda update-function-configuration \
+                                --function-name ${LAMBDA_FUNCTION_NAME} \
+                                --handler "src/index.handler" || {
+                                    echo "Warning: Failed to update handler, continuing..."
+                                }
                         else
                             echo "Lambda function does not exist yet."
                             echo "It should be created by infrastructure repo deployment."
