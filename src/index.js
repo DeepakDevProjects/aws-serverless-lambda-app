@@ -80,8 +80,9 @@ exports.handler = async (event, context) => {
          * - Your own API
          * - Third-party APIs (Twitter, Weather, etc.)
          * - Other AWS services
+         * testing123
          */
-        const apiUrl = process.env.API_URL || 'https://jsonplaceholder.typicode.com/posts/1';
+        const apiUrl = process.env.API_URL || 'https://httpbin.org/json';
         console.log('Making API call to:', apiUrl);
         
         const response = await fetch(apiUrl, {
