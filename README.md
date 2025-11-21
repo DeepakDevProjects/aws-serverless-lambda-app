@@ -69,4 +69,4 @@ The pipeline supports **any branch name** and automatically extracts identifiers
 Updated to support any branch name with flexible PR number extraction (2025-11-17).
 
 **Test push:** Testing pipeline with branch `feature/pr-212` - should extract PR number `212`.
-hjbhjhj
+Removed unwanted lines.
